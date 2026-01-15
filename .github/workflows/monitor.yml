@@ -2,12 +2,13 @@ name: Weverse Stock Monitor
 
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/1 * * * *"   # 每 1 分钟监控一次
   workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v3
 
@@ -15,14 +16,18 @@ jobs:
         with:
           python-version: "3.10"
 
-      - run: pip install requests
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
-      - run: python monitor.py
+      - name: Run monitor
+        run: |
+          python monitor.py
 
-      - name: Commit status file
+      - name: Commit status files
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add status.txt
+          git add status_*.txt
           git commit -m "Update stock status" || echo "No changes"
           git push

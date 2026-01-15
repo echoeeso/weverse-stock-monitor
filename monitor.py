@@ -7,7 +7,7 @@ import json
 # =========================
 
 FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/42a71dae-fd65-4bae-b4cf-440e4335e678"
-DEBUG = False   # 想看 saleStockId ↔ SKU 名字映射就改成 True
+DEBUG = False   # 调试 saleStockId ↔ SKU 名称时改成 True
 
 HEADERS = {
     "User-Agent": (
@@ -66,7 +66,38 @@ def save_state(path, data):
         json.dump(data, f)
 
 # =========================
-# 核心库存判断
+# 核心兜底判断（重点）
+# =========================
+
+def is_stock_purchasable(stock):
+    # 明确可买
+    if stock.get("purchasable") is True:
+        return True
+
+    # 曾出现过的可买字段
+    if stock.get("canBuy") is True:
+        return True
+
+    # 明确未售罄
+    if stock.get("isSoldOut") is False:
+        return True
+
+    # 数量型字段兜底
+    for key in ("stockQuantity", "purchasableQuantity", "quantity"):
+        try:
+            if int(stock.get(key, 0)) > 0:
+                return True
+        except Exception:
+            pass
+
+    # 状态兜底（部分商品只有这个）
+    if stock.get("status") in ("ON_SALE", "SALE"):
+        return True
+
+    return False
+
+# =========================
+# 获取当前库存状态
 # =========================
 
 def get_current_state(product):
@@ -81,7 +112,7 @@ def get_current_state(product):
 
     data = r.json()
 
-    # 建立 SKU 名称映射
+    # SKU 名称映射
     sku_name_map = {}
     build_sku_name_map(data, sku_name_map)
 
@@ -93,7 +124,7 @@ def get_current_state(product):
     available_skus = []
 
     for stock in data.get("saleStocks", []):
-        if stock.get("purchasable") is True:
+        if is_stock_purchasable(stock):
             sid = stock.get("saleStockId")
             name = sku_name_map.get(sid, f"SKU-{sid}")
             available_skus.append(name)
@@ -102,7 +133,7 @@ def get_current_state(product):
 
     return {
         "status": status,
-        "skus": sorted(available_skus)
+        "skus": sorted(set(available_skus))
     }
 
 # =========================
@@ -125,27 +156,22 @@ def main():
             save_state(product["state_file"], current)
             continue
 
-        # === 商品级补货 ===
+        # 商品级补货
         if last["status"] == "OUT_OF_STOCK" and current["status"] == "IN_STOCK":
-            sku_text = "\n".join(current["skus"])
             send_message(
                 f"🚨 Weverse 商品已补货！\n"
                 f"商品：{product['name']}\n\n"
-                f"📦 可购买 SKU：\n{sku_text}\n"
+                f"📦 可购买 SKU：\n" + "\n".join(current["skus"]) + "\n"
                 f"{product['product_url']}"
             )
 
-        # === SKU 级补货 ===
-        last_skus = set(last.get("skus", []))
-        current_skus = set(current.get("skus", []))
-        new_skus = sorted(current_skus - last_skus)
-
-        if new_skus and last["status"] == "IN_STOCK":
-            sku_text = "\n".join(new_skus)
+        # SKU 级补货
+        new_skus = sorted(set(current["skus"]) - set(last.get("skus", [])))
+        if new_skus:
             send_message(
                 f"🧸 Weverse SKU 补货！\n"
                 f"商品：{product['name']}\n"
-                f"新增 SKU：\n{sku_text}\n"
+                f"新增 SKU：\n" + "\n".join(new_skus) + "\n"
                 f"{product['product_url']}"
             )
 

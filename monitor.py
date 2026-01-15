@@ -41,7 +41,7 @@ def get_status(product):
         timeout=10
     )
 
-    if not r.headersget("Content-Type", "").startswith("application/json"):
+    if not r.headers.get("Content-Type", "").startswith("application/json"):
         return "OUT_OF_STOCK"
 
     data = r.json()

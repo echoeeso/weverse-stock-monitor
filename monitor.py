@@ -41,16 +41,27 @@ def get_status(product):
         timeout=10
     )
 
-    if not r.headers.get("Content-Type", "").startswith("application/json"):
+    if not r.headersget("Content-Type", "").startswith("application/json"):
         return "OUT_OF_STOCK"
 
     data = r.json()
 
-    skus = data.get("options") or []
-    for sku in skus:
-        if sku.get("onSale") is True:
-            # 多字段兜底判断
-            if (
+    # ---------- 情况 1：旧结构 / 简单商品 ----------
+    options = data.get("options") or []
+    for sku in options:
+        if sku.get("onSale") is True and (
+            sku.get("purchasable") is True
+            or sku.get("purchasableQuantity", 0) > 0
+            or sku.get("stockQuantity", 0) > 0
+        ):
+            return "IN_STOCK"
+
+    # ---------- 情况 2：多 SKU 新结构（txt雪娃） ----------
+    items = data.get("items") or []
+    for item in items:
+        variants = item.get("variants") or []
+        for sku in variants:
+            if sku.get("onSale") is True and (
                 sku.get("purchasable") is True
                 or sku.get("purchasableQuantity", 0) > 0
                 or sku.get("stockQuantity", 0) > 0

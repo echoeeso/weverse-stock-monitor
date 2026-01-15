@@ -34,41 +34,67 @@ def send_message(text):
     }
     requests.post(FEISHU_WEBHOOK, json=data, timeout=10)
 
-def get_status(product):
+import json
+import re
+import requests
+
+def get_status_html(product):
     r = requests.get(
-        product["api_url"],
-        headers={**HEADERS, "Referer": product["product_url"]},
-        timeout=10
+        product["product_url"],
+        headers=HEADERS,
+        timeout=15
     )
 
-    if not r.headers.get("Content-Type", "").startswith("application/json"):
-        return "OUT_OF_STOCK"
+    html = r.text
 
-    data = r.json()
+    # 1. 提取 __NEXT_DATA__
+    m = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        html,
+        re.S
+    )
 
-    # ---------- 情况 1：旧结构 / 简单商品 ----------
-    options = data.get("options") or []
-    for sku in options:
-        if sku.get("onSale") is True and (
-            sku.get("purchasable") is True
-            or sku.get("purchasableQuantity", 0) > 0
-            or sku.get("stockQuantity", 0) > 0
-        ):
-            return "IN_STOCK"
+    if not m:
+        return "OUT_OF_STOCK", []
 
-    # ---------- 情况 2：多 SKU 新结构（txt雪娃） ----------
-    items = data.get("items") or []
-    for item in items:
-        variants = item.get("variants") or []
-        for sku in variants:
-            if sku.get("onSale") is True and (
-                sku.get("purchasable") is True
-                or sku.get("purchasableQuantity", 0) > 0
-                or sku.get("stockQuantity", 0) > 0
-            ):
-                return "IN_STOCK"
+    data = json.loads(m.group(1))
 
-    return "OUT_OF_STOCK"
+    # 2. 一路下钻（结构可能略有变化，用兜底）
+    props = data.get("props", {})
+    pageProps = props.get("pageProps", {})
+
+    sale = (
+        pageProps.get("sale")
+        or pageProps.get("product")
+        or {}
+    )
+
+    saleStocks = sale.get("saleStocks") or []
+
+    in_stock_skus = []
+
+    for stock in saleStocks:
+        name = (
+            stock.get("optionValue")
+            or stock.get("optionName")
+            or stock.get("name")
+            or f"SKU-{stock.get('saleStockId')}"
+        )
+
+        # 多字段兜底（和网页逻辑一致）
+        purchasable = (
+            stock.get("purchasable") is True
+            or stock.get("canBuy") is True
+            or stock.get("isSoldOut") is False
+        )
+
+        if purchasable:
+            in_stock_skus.append(name)
+
+    if in_stock_skus:
+        return "IN_STOCK", in_stock_skus
+
+    return "OUT_OF_STOCK", []
 
 def read_last_status(file):
     if not os.path.exists(file):
@@ -82,24 +108,29 @@ def write_status(file, status):
 
 def main():
     for product in PRODUCTS:
-        current = get_status(product)
+        current, skus = get_status_html(product)
         last = read_last_status(product["status_file"])
 
         # 第一次运行：一定提醒
         if last is None:
-            send_message(
+            msg = (
                 f"📦 Weverse 商品监控已启动\n"
                 f"商品：{product['name']}\n"
                 f"当前状态：{current}\n"
-                f"{product['product_url']}"
             )
+            if skus:
+                msg += "可购买 SKU：\n" + "\n".join(skus) + "\n"
+            msg += product["product_url"]
 
-        # 从无货 → 有货：提醒
+            send_message(msg)
+
+        # 无 → 有：提醒
         elif last == "OUT_OF_STOCK" and current == "IN_STOCK":
             send_message(
                 f"🚨 Weverse 商品已补货！\n"
                 f"商品：{product['name']}\n"
-                f"请尽快下单：\n"
+                f"可购买 SKU：\n"
+                f"{chr(10).join(skus)}\n"
                 f"{product['product_url']}"
             )
 

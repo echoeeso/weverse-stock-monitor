@@ -46,13 +46,16 @@ def get_status(product):
 
     data = r.json()
 
-    options = data.get("options") or []
-    for opt in options:
-        if opt.get("onSale") is True and opt.get("stockQuantity", 0) > 0:
-            return "IN_STOCK"
-
-    if data.get("purchasable") is True:
-        return "IN_STOCK"
+    skus = data.get("options") or []
+    for sku in skus:
+        if sku.get("onSale") is True:
+            # 多字段兜底判断
+            if (
+                sku.get("purchasable") is True
+                or sku.get("purchasableQuantity", 0) > 0
+                or sku.get("stockQuantity", 0) > 0
+            ):
+                return "IN_STOCK"
 
     return "OUT_OF_STOCK"
 

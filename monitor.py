@@ -122,6 +122,12 @@ def main():
         current_skus = fetch_sku_names(product["sale_id"]) if in_stock else []
         last_skus = read_json(product["sku_file"])
 
+        print("======== DEBUG ========")
+        print("商品：", product["name"])
+        print("网页判断 in_stock =", in_stock)
+        print("当前 SKU：", current_skus)
+        print("上一次 SKU：", last_skus)
+
         # 第一次运行
         if last_status is None:
             sku_text = ""

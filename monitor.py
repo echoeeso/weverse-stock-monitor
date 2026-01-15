@@ -1,173 +1,174 @@
-import requests
-import os
-from bs4 import BeautifulSoup
 import json
+import time
+import requests
+from pathlib import Path
+from playwright.sync_api import sync_playwright
 
-# ================== 配置 ==================
-FEISHU_WEBHOOK = "你的飞书 Webhook"
+# ========== 基本配置 ==========
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-}
+FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/42a71dae-fd65-4bae-b4cf-440e4335e678"
 
 PRODUCTS = [
     {
         "name": "角巴兔原皮",
-        "sale_id": "43782",
         "url": "https://shop.weverse.io/en/shop/USD/artists/3/sales/43782",
-        "status_file": "status_43782.txt",
-        "sku_file": "sku_43782.json",
+        "state_file": "state_43782.json",
     },
     {
         "name": "txt雪娃",
-        "sale_id": "51621",
         "url": "https://shop.weverse.io/en/shop/USD/artists/3/sales/51621",
-        "status_file": "status_51621.txt",
-        "sku_file": "sku_51621.json",
+        "state_file": "state_51621.json",
     },
 ]
 
-# ================== 飞书 ==================
-def send_message(text):
-    data = {"msg_type": "text", "content": {"text": text}}
-    requests.post(FEISHU_WEBHOOK, json=data, timeout=10)
+DEBUG = True
 
-# ================== 网页最终裁决 ==================
-def html_in_stock(product_url):
-    r = requests.get(product_url, headers=HEADERS, timeout=15)
-    soup = BeautifulSoup(r.text, "html.parser")
 
-    main = soup.find("main")
-    if not main:
-        return False
+# ========== 飞书通知 ==========
 
-    keywords = ["add to cart", "buy now", "purchase"]
+def send_feishu(text: str):
+    payload = {
+        "msg_type": "text",
+        "content": {"text": text}
+    }
+    requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
 
-    for tag in main.find_all(["button", "a"]):
-        text = (tag.get_text() or "").strip().lower()
-        if any(k in text for k in keywords):
-            if (
-                not tag.has_attr("disabled")
-                and "disabled" not in tag.get("class", [])
-                and "sold out" not in text
-            ):
-                return True
 
-    return False
+# ========== 状态读写 ==========
 
-# ================== API：只用于 SKU 展示 ==================
-def fetch_sku_names(sale_id):
-    url = f"https://shop.weverse.io/api/v1/products/{sale_id}"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        if not r.headers.get("Content-Type", "").startswith("application/json"):
-            return []
-        data = r.json()
-    except Exception:
-        return []
+def load_state(path: str):
+    if not Path(path).exists():
+        return {}
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
-    names = []
 
-    for stock in data.get("saleStocks", []):
-        name = (
-            stock.get("name")
-            or stock.get("optionValue")
-            or stock.get("label")
-            or f"SKU-{stock.get('saleStockId')}"
+def save_state(path: str, data: dict):
+    Path(path).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+# ========== 核心：网页 SKU 裁决 ==========
+
+def get_sku_status_from_page(page):
+    """
+    返回：
+    {
+        "SKU 名字": True / False  # True = 可点击（可买）
+    }
+    """
+    sku_status = {}
+
+    # ⚠️ Weverse SKU 实际是 button / li / div 混合
+    # 用最宽松但安全的方式抓
+    sku_elements = page.query_selector_all(
+        "button, li, div"
+    )
+
+    for el in sku_elements:
+        text = (el.inner_text() or "").strip()
+
+        if not text:
+            continue
+
+        # 过滤明显不是 SKU 的内容
+        if len(text) > 40:
+            continue
+        if "sold" in text.lower() and len(text) > 10:
+            continue
+
+        try:
+            disabled = el.is_disabled()
+        except:
+            disabled = False
+
+        aria_disabled = el.get_attribute("aria-disabled") == "true"
+        class_name = el.get_attribute("class") or ""
+
+        is_disabled = (
+            disabled
+            or aria_disabled
+            or "disabled" in class_name.lower()
+            or "sold" in class_name.lower()
         )
 
-        purchasable = (
-            stock.get("purchasable") is True
-            or stock.get("canBuy") is True
-            or stock.get("isSoldOut") is False
-        )
+        # 只记录“像 SKU 的东西”
+        if text.isupper() or " " in text:
+            sku_status[text] = not is_disabled
 
-        if purchasable:
-            names.append(name)
+    return sku_status
 
-    return sorted(set(names))
 
-# ================== 文件工具 ==================
-def read_text(file):
-    if not os.path.exists(file):
-        return None
-    with open(file, "r") as f:
-        return f.read().strip()
+# ========== 主流程 ==========
 
-def write_text(file, content):
-    with open(file, "w") as f:
-        f.write(content)
-
-def read_json(file):
-    if not os.path.exists(file):
-        return []
-    with open(file, "r") as f:
-        return json.load(f)
-
-def write_json(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# ================== 主逻辑 ==================
 def main():
-    for product in PRODUCTS:
-        in_stock = html_in_stock(product["url"])
-        current_status = "IN_STOCK" if in_stock else "OUT_OF_STOCK"
-        last_status = read_text(product["status_file"])
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-        current_skus = fetch_sku_names(product["sale_id"]) if in_stock else []
-        last_skus = read_json(product["sku_file"])
+        for product in PRODUCTS:
+            name = product["name"]
+            url = product["url"]
+            state_file = product["state_file"]
 
-        print("======== DEBUG ========")
-        print("商品：", product["name"])
-        print("网页判断 in_stock =", in_stock)
-        print("当前 SKU：", current_skus)
-        print("上一次 SKU：", last_skus)
+            print("\n======== DEBUG ========")
+            print("商品：", name)
 
-        # 第一次运行
-        if last_status is None:
-            sku_text = ""
-            if current_skus:
-                sku_text = "\n可选 SKU：\n" + "\n".join(f"- {s}" for s in current_skus)
+            page.goto(url, timeout=60000)
+            page.wait_for_timeout(5000)
 
-            send_message(
-                f"📦 Weverse 商品监控已启动\n"
-                f"商品：{product['name']}\n"
-                f"当前状态：{current_status}"
-                f"{sku_text}\n"
-                f"{product['url']}"
-            )
+            current_skus = get_sku_status_from_page(page)
+            last_state = load_state(state_file)
 
-        # 商品级补货
-        elif last_status == "OUT_OF_STOCK" and current_status == "IN_STOCK":
-            sku_text = ""
-            if current_skus:
-                sku_text = "\n可选 SKU：\n" + "\n".join(f"- {s}" for s in current_skus)
+            if DEBUG:
+                print("当前 SKU：", current_skus)
+                print("上一次 SKU：", last_state)
 
-            send_message(
-                f"🚨 Weverse 商品已补货！\n"
-                f"商品：{product['name']}"
-                f"{sku_text}\n\n"
-                f"{product['url']}"
-            )
+            # SKU 级变化检测
+            newly_in_stock = []
 
-        # SKU 级新增提醒
-        if in_stock:
-            new_skus = sorted(set(current_skus) - set(last_skus))
-            for sku in new_skus:
-                send_message(
-                    f"🆕 SKU 可购买提醒\n"
-                    f"商品：{product['name']}\n"
-                    f"SKU：{sku}\n\n"
-                    f"{product['url']}"
+            for sku, can_buy in current_skus.items():
+                last_can_buy = last_state.get(sku, False)
+                if can_buy and not last_can_buy:
+                    newly_in_stock.append(sku)
+
+            # 商品级兜底判断
+            product_in_stock = any(current_skus.values())
+            last_product_in_stock = any(last_state.values()) if last_state else False
+
+            # 第一次运行
+            if not last_state:
+                send_feishu(
+                    f"📦 Weverse 商品监控已启动\n"
+                    f"商品：{name}\n"
+                    f"当前状态：{'IN_STOCK' if product_in_stock else 'OUT_OF_STOCK'}\n"
+                    f"{url}"
                 )
 
-        write_text(product["status_file"], current_status)
-        write_json(product["sku_file"], current_skus)
+            # SKU 级提醒（核心）
+            if newly_in_stock:
+                sku_text = "\n".join(f"✅ {s}" for s in newly_in_stock)
+                send_feishu(
+                    f"🚨 Weverse SKU 补货提醒\n\n"
+                    f"商品：{name}\n"
+                    f"可购买 SKU：\n{sku_text}\n\n"
+                    f"{url}"
+                )
+
+            # 商品级兜底提醒
+            elif (not last_product_in_stock) and product_in_stock:
+                send_feishu(
+                    f"🚨 Weverse 商品已可购买\n\n"
+                    f"商品：{name}\n"
+                    f"当前网页显示可下单\n\n"
+                    f"{url}"
+                )
+
+            save_state(state_file, current_skus)
+
+        browser.close()
+
 
 if __name__ == "__main__":
     main()

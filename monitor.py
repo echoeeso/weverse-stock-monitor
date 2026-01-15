@@ -8,6 +8,16 @@ API_URL = "https://shop.weverse.io/api/v1/products/43782"
 
 STATUS_FILE = "status.txt"
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": PRODUCT_URL,
+}
+
 def send_message(text):
     data = {
         "msg_type": "text",
@@ -15,15 +25,21 @@ def send_message(text):
             "text": text
         }
     }
-    requests.post(FEISHU_WEBHOOK, json=data)
+    requests.post(FEISHU_WEBHOOK, json=data, timeout=10)
 
 def get_current_status():
-    r = requests.get(API_URL, timeout=10)
+    r = requests.get(API_URL, headers=HEADERS, timeout=10)
+
+    # 👇 关键防御：不是 JSON 就直接当没货
+    if not r.headers.get("Content-Type", "").startswith("application/json"):
+        return "OUT_OF_STOCK"
+
     data = r.json()
 
-    # 关键判断（字段名可能有轻微变化，但这个结构最常见）
+    # 接口字段兜底判断
     if data.get("purchasable") is True:
         return "IN_STOCK"
+
     return "OUT_OF_STOCK"
 
 def read_last_status():
@@ -40,18 +56,19 @@ def main():
     current = get_current_status()
     last = read_last_status()
 
-    # 第一次运行
+    # 第一次运行：一定提醒
     if last is None:
         send_message(
-            f"📦 Weverse 商品监控已启动\n"
+            "📦 Weverse 商品监控已启动\n"
             f"当前状态：{current}\n"
             f"{PRODUCT_URL}"
         )
-    # 从无货 → 有货
+
+    # 从无货 → 有货：提醒
     elif last == "OUT_OF_STOCK" and current == "IN_STOCK":
         send_message(
-            f"🚨 Weverse 商品已补货！\n"
-            f"请尽快下单：\n"
+            "🚨 Weverse 商品已补货！\n"
+            "请尽快下单：\n"
             f"{PRODUCT_URL}"
         )
 

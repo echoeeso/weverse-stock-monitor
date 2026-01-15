@@ -38,6 +38,20 @@ import json
 import re
 import requests
 
+def extract_sale_stocks(obj, results):
+    """
+    递归遍历 JSON，抓所有包含 saleStockId 的对象
+    """
+    if isinstance(obj, dict):
+        if "saleStockId" in obj:
+            results.append(obj)
+        for v in obj.values():
+            extract_sale_stocks(v, results)
+    elif isinstance(obj, list):
+        for item in obj:
+            extract_sale_stocks(item, results)
+
+
 def get_status_html(product):
     r = requests.get(
         product["product_url"],
@@ -47,41 +61,34 @@ def get_status_html(product):
 
     html = r.text
 
-    # 1. 提取 __NEXT_DATA__
+    # 1️⃣ 提取 __NEXT_DATA__
     m = re.search(
         r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
         html,
         re.S
     )
-
     if not m:
         return "OUT_OF_STOCK", []
 
     data = json.loads(m.group(1))
 
-    # 2. 一路下钻（结构可能略有变化，用兜底）
-    props = data.get("props", {})
-    pageProps = props.get("pageProps", {})
-
-    sale = (
-        pageProps.get("sale")
-        or pageProps.get("product")
-        or {}
-    )
-
-    saleStocks = sale.get("saleStocks") or []
+    # 2️⃣ 全局搜索 saleStock
+    sale_stocks = []
+    extract_sale_stocks(data, sale_stocks)
 
     in_stock_skus = []
 
-    for stock in saleStocks:
+    for stock in sale_stocks:
+        # SKU 名称多重兜底
         name = (
             stock.get("optionValue")
             or stock.get("optionName")
             or stock.get("name")
+            or stock.get("displayName")
             or f"SKU-{stock.get('saleStockId')}"
         )
 
-        # 多字段兜底（和网页逻辑一致）
+        # 是否可买（网页最终逻辑）
         purchasable = (
             stock.get("purchasable") is True
             or stock.get("canBuy") is True
@@ -92,9 +99,10 @@ def get_status_html(product):
             in_stock_skus.append(name)
 
     if in_stock_skus:
-        return "IN_STOCK", in_stock_skus
+        return "IN_STOCK", sorted(set(in_stock_skus))
 
     return "OUT_OF_STOCK", []
+
 
 def read_last_status(file):
     if not os.path.exists(file):

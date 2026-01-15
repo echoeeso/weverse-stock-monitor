@@ -1,7 +1,14 @@
 import requests
 import os
+import json
 
-FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/42a71dae-fd65-4bae-b4cf-440e4335e678"
+# =========================
+# 基础配置
+# =========================
+
+FEISHU_WEBHOOK = "你的飞书 Webhook"
+
+DEBUG = True  # ← 想看 sku 映射就 True，用稳定了改成 False
 
 HEADERS = {
     "User-Agent": (
@@ -17,132 +24,120 @@ PRODUCTS = [
         "name": "角巴兔原皮",
         "product_url": "https://shop.weverse.io/en/shop/USD/artists/3/sales/43782",
         "api_url": "https://shop.weverse.io/api/v1/products/43782",
-        "status_file": "status_43782.txt",
+        "status_file": "status_43782.json",
     },
     {
         "name": "txt雪娃",
         "product_url": "https://shop.weverse.io/en/shop/USD/artists/3/sales/51621",
         "api_url": "https://shop.weverse.io/api/v1/products/51621",
-        "status_file": "status_51621.txt",
+        "status_file": "status_51621.json",
     },
 ]
 
+# =========================
+# 工具函数
+# =========================
+
 def send_message(text):
-    data = {
-        "msg_type": "text",
-        "content": {"text": text}
-    }
-    requests.post(FEISHU_WEBHOOK, json=data, timeout=10)
+    requests.post(
+        FEISHU_WEBHOOK,
+        json={"msg_type": "text", "content": {"text": text}},
+        timeout=10
+    )
 
-import json
-import re
-import requests
-
-def extract_sale_stocks(obj, results):
-    """
-    递归遍历 JSON，抓所有包含 saleStockId 的对象
-    """
+def build_sku_name_map(obj, mapping):
+    """递归提取 saleStockId ↔ SKU 名称"""
     if isinstance(obj, dict):
-        if "saleStockId" in obj:
-            results.append(obj)
+        if "saleStockId" in obj and "value" in obj:
+            mapping[obj["saleStockId"]] = obj["value"]
         for v in obj.values():
-            extract_sale_stocks(v, results)
+            build_sku_name_map(v, mapping)
     elif isinstance(obj, list):
         for item in obj:
-            extract_sale_stocks(item, results)
+            build_sku_name_map(item, mapping)
 
+def read_last_state(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
 
-def get_status_html(product):
+def write_state(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+# =========================
+# 核心逻辑
+# =========================
+
+def get_stock_status(product):
     r = requests.get(
-        product["product_url"],
-        headers=HEADERS,
-        timeout=15
+        product["api_url"],
+        headers={**HEADERS, "Referer": product["product_url"]},
+        timeout=10
     )
 
-    html = r.text
-
-    # 1️⃣ 提取 __NEXT_DATA__
-    m = re.search(
-        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-        html,
-        re.S
-    )
-    if not m:
+    if not r.headers.get("Content-Type", "").startswith("application/json"):
         return "OUT_OF_STOCK", []
 
-    data = json.loads(m.group(1))
+    data = r.json()
 
-    # 2️⃣ 全局搜索 saleStock
-    sale_stocks = []
-    extract_sale_stocks(data, sale_stocks)
+    # 建立 SKU 映射
+    sku_name_map = {}
+    build_sku_name_map(data, sku_name_map)
 
-    in_stock_skus = []
+    if DEBUG:
+        print(f"\n[DEBUG] {product['name']} SKU 映射：")
+        for k, v in sku_name_map.items():
+            print(f"  saleStockId {k} → {v}")
 
-    for stock in sale_stocks:
-        # SKU 名称多重兜底
-        name = (
-            stock.get("optionValue")
-            or stock.get("optionName")
-            or stock.get("name")
-            or stock.get("displayName")
-            or f"SKU-{stock.get('saleStockId')}"
-        )
+    available = []
 
-        # 是否可买（网页最终逻辑）
-        purchasable = (
-            stock.get("purchasable") is True
-            or stock.get("canBuy") is True
-            or stock.get("isSoldOut") is False
-        )
+    for stock in data.get("saleStocks", []):
+        if stock.get("purchasable") is True:
+            sid = stock.get("saleStockId")
+            name = sku_name_map.get(sid, f"SKU-{sid}")
+            available.append(name)
 
-        if purchasable:
-            in_stock_skus.append(name)
-
-    if in_stock_skus:
-        return "IN_STOCK", sorted(set(in_stock_skus))
+    if available:
+        return "IN_STOCK", available
 
     return "OUT_OF_STOCK", []
 
-
-def read_last_status(file):
-    if not os.path.exists(file):
-        return None
-    with open(file, "r") as f:
-        return f.read().strip()
-
-def write_status(file, status):
-    with open(file, "w") as f:
-        f.write(status)
+# =========================
+# 主流程
+# =========================
 
 def main():
     for product in PRODUCTS:
-        current, skus = get_status_html(product)
-        last = read_last_status(product["status_file"])
+        status, skus = get_stock_status(product)
+        last = read_last_state(product["status_file"])
 
-        # 第一次运行：一定提醒
+        current_state = {
+            "status": status,
+            "skus": skus
+        }
+
+        # 第一次运行
         if last is None:
-            msg = (
+            send_message(
                 f"📦 Weverse 商品监控已启动\n"
                 f"商品：{product['name']}\n"
-                f"当前状态：{current}\n"
-            )
-            if skus:
-                msg += "可购买 SKU：\n" + "\n".join(skus) + "\n"
-            msg += product["product_url"]
-
-            send_message(msg)
-
-        # 无 → 有：提醒
-        elif last == "OUT_OF_STOCK" and current == "IN_STOCK":
-            send_message(
-                f"🚨 Weverse 商品已补货！\n"
-                f"商品：{product['name']}\n"
-                f"可购买 SKU：\n"
-                f"{chr(10).join(skus)}\n"
+                f"当前状态：{status}\n"
                 f"{product['product_url']}"
             )
 
-        write_status(product["status_file"], current)
+        # 从无货 → 有货
+        elif last["status"] == "OUT_OF_STOCK" and status == "IN_STOCK":
+            sku_text = "\n".join(skus)
+            send_message(
+                f"🚨 Weverse 商品已补货！\n"
+                f"商品：{product['name']}\n"
+                f"可购买 SKU：\n{sku_text}\n"
+                f"{product['product_url']}"
+            )
+
+        write_state(product["status_file"], current_state)
 
 if __name__ == "__main__":
     main()

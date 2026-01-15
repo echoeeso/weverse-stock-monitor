@@ -2,7 +2,7 @@ name: Weverse Stock Monitor
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # 每 1 分钟监控一次
+    - cron: "*/1 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -16,18 +16,17 @@ jobs:
         with:
           python-version: "3.10"
 
+      # ① 安装 Python 依赖
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install requests playwright
 
+      # ② 安装 Playwright 浏览器（关键）
+      - name: Install Playwright browsers
+        run: |
+          playwright install chromium
+
+      # ③ 运行监控脚本
       - name: Run monitor
         run: |
           python monitor.py
-
-      - name: Commit status files
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add status_*.txt
-          git commit -m "Update stock status" || echo "No changes"
-          git push
